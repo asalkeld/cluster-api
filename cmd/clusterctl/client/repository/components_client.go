@@ -62,7 +62,7 @@ func (f *componentsClient) Get(options ComponentsOptions) (Components, error) {
 	if err != nil {
 		return nil, err
 	}
-	return NewComponents(ComponentsInput{f.provider, f.configClient, f.processor, file, options})
+	return NewComponents(ComponentsInput{f.provider, f.configClient, f.processor, file, nil, options})
 }
 
 func (f *componentsClient) getRawBytes(options *ComponentsOptions) ([]byte, error) {

@@ -150,12 +150,16 @@ type ComponentsOptions struct {
 	SkipTemplateProcess bool
 }
 
+// ObjModifierFn is a function that can modify the list of objects.
+type ObjModifierFn func([]unstructured.Unstructured) ([]unstructured.Unstructured, error)
+
 // ComponentsInput represents all the inputs required by NewComponents.
 type ComponentsInput struct {
 	Provider     config.Provider
 	ConfigClient config.Client
 	Processor    yaml.Processor
 	RawYaml      []byte
+	ObjModifier  ObjModifierFn
 	Options      ComponentsOptions
 }
 
@@ -240,6 +244,12 @@ func NewComponents(input ComponentsInput) (Components, error) {
 	// Add common labels.
 	objs = addCommonLabels(objs, input.Provider)
 
+	if input.ObjModifier != nil {
+		objs, err = input.ObjModifier(objs)
+		if err != nil {
+			return nil, errors.Wrap(err, "failed to modify instance objects")
+		}
+	}
 	return &components{
 		Provider:        input.Provider,
 		version:         input.Options.Version,
