@@ -18,9 +18,15 @@ package repository
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/pkg/errors"
+	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
+	admissionregistrationv1beta1 "k8s.io/api/admissionregistration/v1beta1"
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1alpha4"
@@ -33,10 +39,14 @@ import (
 )
 
 const (
-	namespaceKind          = "Namespace"
-	clusterRoleKind        = "ClusterRole"
-	clusterRoleBindingKind = "ClusterRoleBinding"
-	roleBindingKind        = "RoleBinding"
+	namespaceKind                      = "Namespace"
+	clusterRoleKind                    = "ClusterRole"
+	clusterRoleBindingKind             = "ClusterRoleBinding"
+	roleBindingKind                    = "RoleBinding"
+	deploymentKind                     = "Deployment"
+	serviceKind                        = "Service"
+	mutatingWebhookConfigurationKind   = "MutatingWebhookConfiguration"
+	validatingWebhookConfigurationKind = "ValidatingWebhookConfiguration"
 )
 
 const (
@@ -231,7 +241,10 @@ func NewComponents(input ComponentsInput) (Components, error) {
 	objs = addNamespaceIfMissing(objs, input.Options.TargetNamespace)
 
 	// fix Namespace name in all the objects
-	objs = fixTargetNamespace(objs, input.Options.TargetNamespace)
+	objs, err = fixTargetNamespace(objs, input.Options.TargetNamespace)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to fix TargetNamespace")
+	}
 
 	// ensures all the ClusterRole and ClusterRoleBinding have the name prefixed with the namespace name and that
 	// all the clusterRole/clusterRoleBinding namespaced subjects refers to targetNamespace
@@ -303,9 +316,190 @@ func addNamespaceIfMissing(objs []unstructured.Unstructured, targetNamespace str
 	return objs
 }
 
-// fixTargetNamespace ensures all the provider components are deployed in the target namespace (apply only to namespaced objects).
-func fixTargetNamespace(objs []unstructured.Unstructured, targetNamespace string) []unstructured.Unstructured {
+func fixWebHookTargetNamespace(o unstructured.Unstructured, targetNamespace string) (unstructured.Unstructured, error) {
+	var err error
+	switch o.GroupVersionKind().String() {
+	case "admissionregistration.k8s.io/v1beta1, Kind=" + mutatingWebhookConfigurationKind:
+		b := &admissionregistrationv1beta1.MutatingWebhookConfiguration{}
+		if err := scheme.Scheme.Convert(&o, b, nil); err != nil {
+			return o, err
+		}
+
+		whs := []admissionregistrationv1beta1.MutatingWebhook{}
+		for _, w := range b.Webhooks {
+			if w.ClientConfig.Service != nil {
+				w.ClientConfig.Service.Namespace = targetNamespace
+			}
+			whs = append(whs, w)
+		}
+		b.Webhooks = whs
+
+		err = scheme.Scheme.Convert(b, &o, nil)
+
+	case "admissionregistration.k8s.io/v1, Kind=" + mutatingWebhookConfigurationKind:
+		b := &admissionregistrationv1.MutatingWebhookConfiguration{}
+		if err := scheme.Scheme.Convert(&o, b, nil); err != nil {
+			return o, err
+		}
+
+		whs := []admissionregistrationv1.MutatingWebhook{}
+		for _, w := range b.Webhooks {
+			if w.ClientConfig.Service != nil {
+				w.ClientConfig.Service.Namespace = targetNamespace
+			}
+			whs = append(whs, w)
+		}
+		b.Webhooks = whs
+
+		err = scheme.Scheme.Convert(b, &o, nil)
+
+	case "admissionregistration.k8s.io/v1beta1, Kind=" + validatingWebhookConfigurationKind:
+		b := &admissionregistrationv1beta1.ValidatingWebhookConfiguration{}
+		if err := scheme.Scheme.Convert(&o, b, nil); err != nil {
+			return o, err
+		}
+
+		whs := []admissionregistrationv1beta1.ValidatingWebhook{}
+		for _, w := range b.Webhooks {
+			if w.ClientConfig.Service != nil {
+				w.ClientConfig.Service.Namespace = targetNamespace
+			}
+			whs = append(whs, w)
+		}
+		b.Webhooks = whs
+
+		err = scheme.Scheme.Convert(b, &o, nil)
+
+	case "admissionregistration.k8s.io/v1, Kind=" + validatingWebhookConfigurationKind:
+		b := &admissionregistrationv1.ValidatingWebhookConfiguration{}
+		if err := scheme.Scheme.Convert(&o, b, nil); err != nil {
+			return o, err
+		}
+
+		whs := []admissionregistrationv1.ValidatingWebhook{}
+		for _, w := range b.Webhooks {
+			if w.ClientConfig.Service != nil {
+				w.ClientConfig.Service.Namespace = targetNamespace
+			}
+			whs = append(whs, w)
+		}
+		b.Webhooks = whs
+
+		err = scheme.Scheme.Convert(b, &o, nil)
+
+	case "apiextensions.k8s.io/v1, Kind=CustomResourceDefinition":
+		crd := &apiextensionsv1.CustomResourceDefinition{}
+		if err := scheme.Scheme.Convert(&o, crd, nil); err != nil {
+			return o, err
+		}
+
+		if crd.Spec.Conversion != nil && crd.Spec.Conversion.Webhook != nil && crd.Spec.Conversion.Webhook.ClientConfig != nil && crd.Spec.Conversion.Webhook.ClientConfig.Service != nil {
+			crd.Spec.Conversion.Webhook.ClientConfig.Service.Namespace = targetNamespace
+		}
+
+		err = scheme.Scheme.Convert(crd, &o, nil)
+	}
+	return o, err
+}
+
+// This is to make the webhook and controller deployments unique. Both have
+// the following labels, so when placed in the same namespace will get confused
+// over which pod belongs to the correct deployment.
+//
+// apiVersion: apps/v1
+// kind: Deployment
+// metadata:
+//   labels:
+//     cluster.x-k8s.io/provider: infrastructure-aws
+//     control-plane: capa-controller-manager
+// spec:
+//   selector:
+//     matchLabels:
+//       cluster.x-k8s.io/provider: infrastructure-aws
+//       control-plane: capa-controller-manager
+//   template:
+//     metadata:
+//       labels:
+//         cluster.x-k8s.io/provider: infrastructure-aws
+//         control-plane: capa-controller-manager
+//
+// The same label is added to the Service selector to reduce the chance of requests
+// going to the wrong pod.
+func addUniqueLabelsAndSelectors(o unstructured.Unstructured) (unstructured.Unstructured, error) {
+	var err error
+	if o.GetKind() == deploymentKind {
+		d := &appsv1.Deployment{}
+		if err := scheme.Scheme.Convert(&o, d, nil); err != nil {
+			return o, err
+		}
+		if d.Labels == nil {
+			d.Labels = map[string]string{}
+		}
+		d.Labels[clusterv1.OriginalNamespaceLabelName] = o.GetNamespace()
+		if d.Spec.Selector == nil {
+			d.Spec.Selector = &metav1.LabelSelector{MatchLabels: map[string]string{}}
+		}
+		d.Spec.Selector.MatchLabels[clusterv1.OriginalNamespaceLabelName] = o.GetNamespace()
+		if d.Spec.Template.Labels == nil {
+			d.Spec.Template.Labels = map[string]string{}
+		}
+		d.Spec.Template.Labels[clusterv1.OriginalNamespaceLabelName] = o.GetNamespace()
+		err = scheme.Scheme.Convert(d, &o, nil)
+	} else if o.GetKind() == serviceKind {
+		s := &corev1.Service{}
+		if err := scheme.Scheme.Convert(&o, s, nil); err != nil {
+			return o, err
+		}
+		s.Spec.Selector[clusterv1.OriginalNamespaceLabelName] = o.GetNamespace()
+
+		err = scheme.Scheme.Convert(s, &o, nil)
+	}
+
+	return o, err
+}
+
+func uniquifyObjects(objs []unstructured.Unstructured) ([]unstructured.Unstructured, error) {
+	nameMap := map[string]bool{}
 	for _, o := range objs {
+		if util.IsResourceNamespaced(o.GetKind()) {
+			if o.GetNamespace() != WebhookNamespaceName {
+				nameMap[o.GetName()] = true
+			}
+		}
+	}
+
+	for i := range objs {
+		o := objs[i]
+		if util.IsResourceNamespaced(o.GetKind()) {
+			if o.GetKind() == deploymentKind || o.GetKind() == serviceKind {
+				var err error
+				o, err = addUniqueLabelsAndSelectors(o)
+				if err != nil {
+					return nil, err
+				}
+			}
+			if o.GetNamespace() == WebhookNamespaceName {
+				_, nameExistsInOtherNS := nameMap[o.GetName()]
+				if nameExistsInOtherNS {
+					o.SetName(o.GetName() + "-webhook")
+				}
+			}
+			objs[i] = o
+		}
+	}
+	return objs, nil
+}
+
+// fixTargetNamespace ensures all the provider components are deployed in the target namespace (apply only to namespaced objects).
+func fixTargetNamespace(objs []unstructured.Unstructured, targetNamespace string) ([]unstructured.Unstructured, error) {
+	var err error
+	objs, err = uniquifyObjects(objs)
+	if err != nil {
+		return nil, err
+	}
+	for i := range objs {
+		o := objs[i]
+
 		// if the object has Kind Namespace, fix the namespace name
 		if o.GetKind() == namespaceKind {
 			o.SetName(targetNamespace)
@@ -315,9 +509,28 @@ func fixTargetNamespace(objs []unstructured.Unstructured, targetNamespace string
 		if util.IsResourceNamespaced(o.GetKind()) {
 			o.SetNamespace(targetNamespace)
 		}
+		if o.GetKind() == mutatingWebhookConfigurationKind || o.GetKind() == validatingWebhookConfigurationKind {
+			annotations := o.GetAnnotations()
+			secretNamespacedName, ok := annotations["cert-manager.io/inject-ca-from"]
+			if ok {
+				secretName := strings.Split(secretNamespacedName, "/")[1]
+				annotations["cert-manager.io/inject-ca-from"] = targetNamespace + "/" + secretName
+				o.SetAnnotations(annotations)
+			}
+			o, err = fixWebHookTargetNamespace(o, targetNamespace)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if o.GetKind() == "CustomResourceDefinition" {
+			o, err = fixWebHookTargetNamespace(o, targetNamespace)
+			if err != nil {
+				return nil, err
+			}
+		}
+		objs[i] = o
 	}
-
-	return objs
+	return objs, nil
 }
 
 // fixRBAC ensures all the ClusterRole and ClusterRoleBinding have the name prefixed with the namespace name and that

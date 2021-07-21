@@ -31,6 +31,9 @@ const (
 	// tool uses this label for implementing provider's lifecycle operations.
 	ProviderLabelName = "cluster.x-k8s.io/provider"
 
+	// OriginalNamespaceLabelName is the label set on componets that are moved the orignally defined one.
+	OriginalNamespaceLabelName = "cluster.x-k8s.io/original-namespace"
+
 	// ClusterNameAnnotation is the annotation set on nodes identifying the name of the cluster the node belongs to.
 	ClusterNameAnnotation = "cluster.x-k8s.io/cluster-name"
 
