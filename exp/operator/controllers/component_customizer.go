@@ -307,7 +307,12 @@ func customizeObjectsFn(provider genericprovider.GenericProvider) func(objs []un
 				if err := setSpecHashAnnotation(&d.ObjectMeta, d.Spec); err != nil {
 					return nil, err
 				}
-				if provider.GetSpec().Deployment != nil {
+				// Horrible hack alert.
+				// Metal3 has 2 deployments (an extra one for ipam)
+				// if the user has a spec.deployment we got to assume it is not for ipam..
+				// therefore there is no way to currently modify ipam-controller-manager using
+				// this mechanism as of Metal3 v0.5.1.
+				if provider.GetSpec().Deployment != nil && o.GetName() != "ipam-controller-manager" {
 					customizeDeployment(provider.GetSpec(), d)
 				}
 				if err := scheme.Scheme.Convert(d, &o, nil); err != nil {
